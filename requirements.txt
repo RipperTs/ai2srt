@@ -6,3 +6,6 @@ google-generativeai
 requests
 waitress
 Werkzeug
+pydub
+edge_tts
+srt
