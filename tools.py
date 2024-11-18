@@ -55,7 +55,7 @@ def create_short_video(video_path, time_list="", srt_str="",role="",pitch="+0Hz"
         pass
 
 # 创建配音
-def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz",insert_srt=False):
+def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz", insert_srt=False):
     queue_tts = get_subtitle_from_srt(srt_file, is_file=True)
     logger.info(f'1{queue_tts=}')
     for i, it in enumerate(queue_tts):
@@ -71,6 +71,7 @@ def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz",insert_sr
                 proxy=None,
                 pitch=pitch)
             await communicate_task.save(it['filename'])
+
         try:
             asyncio.run(_async_dubb(it))
         except Exception as e:
@@ -90,61 +91,107 @@ def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz",insert_sr
             t.join()
 
     # 连接所有音频片段
-
     for i, it in enumerate(queue_tts):
         the_ext = it['filename'].split('.')[-1]
         raw = it['end_time'] - it['start_time']
-        if i>0 and it['start_time']<queue_tts[i-1]['end_time']:
-            diff=queue_tts[i-1]['end_time']-it['start_time']+50
-            it['start_time']+=diff
-            it['end_time']+=diff
+        if i > 0 and it['start_time'] < queue_tts[i - 1]['end_time']:
+            diff = queue_tts[i - 1]['end_time'] - it['start_time'] + 50
+            it['start_time'] += diff
+            it['end_time'] += diff
         # 存在配音文件
-        if os.path.exists(it['filename']) and  os.path.getsize(it['filename']) > 0:
+        if os.path.exists(it['filename']) and os.path.getsize(it['filename']) > 0:
             try:
                 seg_len = len(AudioSegment.from_file(it['filename'], format=the_ext))
-                if seg_len>raw:
-                    offset=seg_len-raw
-                    it['end_time']+=offset
+                if seg_len > raw:
+                    offset = seg_len - raw
+                    it['end_time'] += offset
             except CouldntDecodeError:
                 pass
-        queue_tts[i]=it
+        queue_tts[i] = it
 
+    # 合并相邻的配音片段，避免短暂的声音闪现
+    merged_segments = []
+    buffer_time = 300  # 300ms的缓冲时间
+
+    if queue_tts:
+        current_segment = {
+            'start_time': max(0, queue_tts[0]['start_time'] - buffer_time),
+            'end_time': queue_tts[0]['end_time'] + buffer_time
+        }
+
+        for i in range(1, len(queue_tts)):
+            if os.path.exists(queue_tts[i]['filename']) and os.path.getsize(queue_tts[i]['filename']) > 0:
+                if queue_tts[i]['start_time'] - buffer_time <= current_segment['end_time']:
+                    # 如果当前片段与下一个片段的缓冲区重叠，则合并它们
+                    current_segment['end_time'] = queue_tts[i]['end_time'] + buffer_time
+                else:
+                    # 如果不重叠，保存当前片段并开始新片段
+                    merged_segments.append(current_segment)
+                    current_segment = {
+                        'start_time': max(0, queue_tts[i]['start_time'] - buffer_time),
+                        'end_time': queue_tts[i]['end_time'] + buffer_time
+                    }
+
+        merged_segments.append(current_segment)
 
     merged_audio = AudioSegment.empty()
-    for i,it in enumerate(queue_tts):
-        if i==0:
-            if it['start_time']>0:
-                merged_audio+=AudioSegment.silent(duration=it['start_time'])
-        else:
-            dur=it['start_time']-queue_tts[i-1]['end_time']>0
-            if dur>0:
-                merged_audio+=AudioSegment.silent(duration=dur)
-
-        if os.path.isfile(it['filename']) and os.path.getsize(it['filename'])>0:
-            merged_audio+=AudioSegment.from_file(it['filename'], format="mp3")
-        else:
-            merged_audio+=AudioSegment.silent(duration=it['end_time']-it['start_time'])
-
-    srts=[]
     for i, it in enumerate(queue_tts):
-        srts.append(f'{it["line"]}\n{ms_to_time_string(ms=it["start_time"])} --> {ms_to_time_string(ms=it["end_time"])}\n'+it["text"].replace('\n',''))
-    shutil.copy2(dirname+'/subtitle.srt',dirname+'/subtitle00.srt')
-    Path(dirname+'/subtitle.srt').write_text('\n\n'.join(srts),encoding='utf-8')
+        if i == 0:
+            if it['start_time'] > 0:
+                merged_audio += AudioSegment.silent(duration=it['start_time'])
+        else:
+            dur = it['start_time'] - queue_tts[i - 1]['end_time']
+            if dur > 0:
+                merged_audio += AudioSegment.silent(duration=dur)
+
+        if os.path.isfile(it['filename']) and os.path.getsize(it['filename']) > 0:
+            merged_audio += AudioSegment.from_file(it['filename'], format="mp3")
+        else:
+            merged_audio += AudioSegment.silent(duration=it['end_time'] - it['start_time'])
+
+    srts = []
+    for i, it in enumerate(queue_tts):
+        srts.append(
+            f'{it["line"]}\n{ms_to_time_string(ms=it["start_time"])} --> {ms_to_time_string(ms=it["end_time"])}\n' + it[
+                "text"].replace('\n', ''))
+    shutil.copy2(dirname + '/subtitle.srt', dirname + '/subtitle00.srt')
+    Path(dirname + '/subtitle.srt').write_text('\n\n'.join(srts), encoding='utf-8')
+
     # 计算时长
     audio_time = len(merged_audio)
     # 获取视频的长度毫秒
-    video_time=get_video_ms(f'{dirname}/{CAIJIAN_HEBING}')
+    video_time = get_video_ms(f'{dirname}/{CAIJIAN_HEBING}')
     if audio_time < video_time:
-        merged_audio+=AudioSegment.silent(duration=video_time-audio_time)
+        merged_audio += AudioSegment.silent(duration=video_time - audio_time)
 
     merged_audio.export(f'{dirname}/{PEIYIN_HEBING}', format="wav")
 
-
     os.chdir(dirname)
 
-    tmp_wav=f"{dirname}/hunhe-{time.time()}.wav"
-    yuan_wav=f'{dirname}/yuan.wav'
-    runffmpeg(['-y','-i',f'{dirname}/{CAIJIAN_HEBING}','-vn',yuan_wav])
+    tmp_wav = f"{dirname}/hunhe-{time.time()}.wav"
+    yuan_wav = f'{dirname}/yuan.wav'
+
+    # 提取原视频的音频
+    runffmpeg(['-y', '-i', f'{dirname}/{CAIJIAN_HEBING}', '-vn', yuan_wav])
+
+    # 构建声音淡入淡出的过滤器字符串
+    volume_filters = []
+    for segment in merged_segments:
+        start_time = segment['start_time'] / 1000
+        end_time = segment['end_time'] / 1000
+        # 添加淡入淡出效果
+        volume_filters.append(
+            f'volume=enable=\'between(t,{start_time},{end_time})\':volume=0'
+        )
+
+    # 将所有没有配音的区间音量设为0.15
+    if volume_filters:
+        volume_filter_str = ','.join(volume_filters) + ',volume=0.15:enable=\'not(' + '+'.join(
+            [f'between(t,{seg["start_time"] / 1000},{seg["end_time"] / 1000})' for seg in merged_segments]) + ')\''
+    else:
+        volume_filter_str = 'volume=0.15'
+
+    # 应用音量过滤器并合并音频
     runffmpeg([
         '-y',
         '-i',
@@ -152,14 +199,17 @@ def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz",insert_sr
         '-i',
         f'{dirname}/{PEIYIN_HEBING}',
         '-filter_complex',
-        "[1:a]apad[a1];[0:a]volume=0.15[a0];[a0][a1]amerge=inputs=2[aout]",
+        f'[0:a]{volume_filter_str}[a0];[1:a]apad[a1];[a0][a1]amerge=inputs=2[aout]',
         '-map',
         '[aout]',
-         tmp_wav])
+        tmp_wav
+    ])
+
     try:
         Path(yuan_wav).unlink(missing_ok=True)
     except:
         pass
+
     if insert_srt:
         runffmpeg([
             "-y",
@@ -185,7 +235,7 @@ def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz",insert_sr
             f"language=chi",
             '-af',
             'volume=1.8',
-            "-shortest",  # 只处理最短的流（视频或音频）
+            "-shortest",
             f'{dirname}/shortvideo.mp4'
         ])
     else:
@@ -205,7 +255,7 @@ def create_tts(*, srt_file, dirname, role="", rate='+0%', pitch="+0Hz",insert_sr
             "aac",
             '-af',
             'volume=1.8',
-            "-shortest",  # 只处理最短的流（视频或音频）
+            "-shortest",
             f'{dirname}/shortvideo.mp4'
         ])
     os.chdir(ROOT_DIR)
